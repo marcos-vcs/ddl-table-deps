@@ -1,159 +1,93 @@
-// ddl-table-deps.js
-const fs = require('fs');
-const path = require('path');
+#!/usr/bin/env node
+const fs = require("fs");
 
-function normalizarNome(nome) {
-    return nome.replace(/[\[\]`"]/g, '').toUpperCase();
-}
-
-// Parser simples para FOREIGN KEYS no DDL
-function parseDDL(ddl) {
-    const relations = {};
-
-    // ALTER TABLE ... ADD CONSTRAINT
-    const fkRegex = /ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+CONSTRAINT\s+[^\s]+\s+FOREIGN\s+KEY\s*\([^\)]+\)\s+REFERENCES\s+([^\s\(]+)/gi;
-    let match;
-    while ((match = fkRegex.exec(ddl)) !== null) {
-        const fromTable = normalizarNome(match[1]);
-        const toTable = normalizarNome(match[2]);
-        if (!relations[fromTable]) relations[fromTable] = [];
-        relations[fromTable].push({ from: fromTable, to: toTable });
-    }
-
-    // CREATE TABLE com FOREIGN KEY inline
-    const createTableRegex = /CREATE\s+TABLE\s+([^\s\(]+)\s*\(([\s\S]*?)\)\s*;/gi;
-    while ((match = createTableRegex.exec(ddl)) !== null) {
-        const tableName = normalizarNome(match[1]);
-        const tableDef = match[2];
-        const inlineFkRegex = /FOREIGN\s+KEY\s*\([^\)]+\)\s+REFERENCES\s+([^\s\(]+)/gi;
-        let fkMatch;
-        while ((fkMatch = inlineFkRegex.exec(tableDef)) !== null) {
-            const toTable = normalizarNome(fkMatch[1]);
-            if (!relations[tableName]) relations[tableName] = [];
-            relations[tableName].push({ from: tableName, to: toTable });
-        }
-    }
-
-    return relations;
-}
-
-// Busca recursiva (direta ou inversa)
-function collectRelations(startTable, relations) {
-    const edges = new Set();
-    const visited = new Set();
-
-    function dfs(table) {
-        if (visited.has(table)) return;
-        visited.add(table);
-
-        if (relations[table]) {
-            for (const rel of relations[table]) {
-                edges.add(`${rel.from}-->${rel.to}`);
-                dfs(rel.to);
-            }
-        }
-
-        for (const [from, deps] of Object.entries(relations)) {
-            for (const rel of deps) {
-                if (rel.to === table) {
-                    edges.add(`${rel.from}-->${rel.to}`);
-                    dfs(rel.from);
-                }
-            }
-        }
-    }
-
-    dfs(startTable);
-    return Array.from(edges);
-}
-
-// Caminhos "referenciadas por"
-function collectPathsDown(startTable, relations) {
-    const paths = [];
-    function dfs(current, path) {
-        if (relations[current]) {
-            for (const rel of relations[current]) {
-                const newPath = [...path, rel.to];
-                paths.push(newPath);
-                dfs(rel.to, newPath);
-            }
-        }
-    }
-    dfs(startTable, [startTable]);
-    return paths;
-}
-
-// Caminhos "que referenciam"
-function collectPathsUp(startTable, relations) {
-    const paths = [];
-    function dfs(current, path) {
-        for (const [from, deps] of Object.entries(relations)) {
-            for (const rel of deps) {
-                if (rel.to === current) {
-                    const newPath = [from, ...path];
-                    paths.push(newPath);
-                    dfs(from, newPath);
-                }
-            }
-        }
-    }
-    dfs(startTable, [startTable]);
-    return paths;
-}
-
-// ----------------- Programa principal -----------------
 if (process.argv.length < 4) {
-    console.error('Uso: node ddl-table-deps.js <arquivo_ddl> <tabela_origem>');
+    console.error("Uso: node ddl-table-deps.js <arquivo_ddl> <tabela_origem>");
     process.exit(1);
 }
 
-const ddlFile = path.resolve(process.argv[2]);
-const startTable = normalizarNome(process.argv[3]);
+const [,, ddlFile, tableOrigin] = process.argv;
+const ddlContent = fs.readFileSync(ddlFile, "utf-8");
 
-if (!fs.existsSync(ddlFile)) {
-    console.error(`Arquivo não encontrado: ${ddlFile}`);
-    process.exit(1);
+// Regex para capturar tabelas e foreign keys
+const tableRegex = /CREATE\s+TABLE\s+(\w+)/gi;
+const fkRegex = /ALTER\s+TABLE\s+(\w+)\s+ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY\s*\(.*?\)\s+REFERENCES\s+(\w+)/gi;
+
+const tables = new Set();
+let match;
+
+// Captura todas as tabelas
+while ((match = tableRegex.exec(ddlContent)) !== null) {
+    tables.add(match[1].toUpperCase());
 }
 
-const ddlContent = fs.readFileSync(ddlFile, 'utf8');
-const relations = parseDDL(ddlContent);
-const edges = collectRelations(startTable, relations);
+// Mapeia relações
+const references = {};     // tabela -> [referências diretas]
+const referencedBy = {};   // tabela -> [tabelas que a referenciam]
 
-// Gerar mermaid.md
-const mermaidContent = [
-    '```mermaid',
-    'graph TD;',
-    ...edges.map(e => `    ${e};`),
-    '```'
-].join('\n');
-
-fs.writeFileSync('mermaid.md', mermaidContent, 'utf8');
-
-// Gerar resultado_analise.txt
-let analise = `Tabela analisada: ${startTable}\n`;
-
-const downPaths = collectPathsDown(startTable, relations);
-analise += `-- Tabelas referenciadas por ${startTable} --\n`;
-if (downPaths.length === 0) {
-    analise += '(Nenhuma)\n';
-} else {
-    downPaths.forEach(p => {
-        analise += p.join(' > ') + '\n';
-    });
+while ((match = fkRegex.exec(ddlContent)) !== null) {
+    const from = match[1].toUpperCase();
+    const to = match[2].toUpperCase();
+    if (!references[from]) references[from] = [];
+    if (!referencedBy[to]) referencedBy[to] = [];
+    references[from].push(to);
+    referencedBy[to].push(from);
 }
 
-const upPaths = collectPathsUp(startTable, relations);
-analise += `-- Tabelas que referenciam ${startTable} --\n`;
-if (upPaths.length === 0) {
-    analise += '(Nenhuma)\n';
-} else {
-    upPaths.forEach(p => {
-        analise += p.join(' -> ') + '\n';
-    });
+// Função recursiva para buscar todos os caminhos (DFS)
+function dfsPaths(current, graph, visited = new Set(), path = []) {
+    visited.add(current);
+    path.push(current);
+
+    const results = [];
+    if (graph[current]) {
+        for (const next of graph[current]) {
+            if (!visited.has(next)) {
+                results.push(...dfsPaths(next, graph, new Set(visited), [...path]));
+            } else {
+                results.push([...path, next]); // loop detectado
+            }
+        }
+    }
+    if (!graph[current] || graph[current].length === 0) {
+        results.push([...path]); // fim do caminho
+    }
+    return results;
 }
 
-fs.writeFileSync('resultado_analise.txt', analise, 'utf8');
+// Gera lista de caminhos formatados
+function formatPaths(paths, separator = " > ") {
+    const unique = new Set(paths.map(p => p.join(separator)));
+    return [...unique].sort();
+}
 
-console.log('Análise concluída. Arquivos gerados:');
-console.log(' - mermaid.md');
-console.log(' - resultado_analise.txt');
+// Busca recursiva para tabelas referenciadas (filhos)
+const referencedPaths = dfsPaths(tableOrigin.toUpperCase(), references);
+
+// Busca recursiva para tabelas que referenciam (pais)
+const referencingPaths = dfsPaths(tableOrigin.toUpperCase(), referencedBy);
+
+// Gera saída Mermaid
+let mermaid = "```mermaid\ngraph TD;\n";
+for (const [from, tos] of Object.entries(references)) {
+    for (const to of tos) {
+        mermaid += `    ${from}-->${to};\n`;
+    }
+}
+mermaid += "```";
+
+// Salva arquivos
+fs.writeFileSync("mermaid.md", mermaid);
+let report = `Tabela analisada: ${tableOrigin.toUpperCase()}\n`;
+
+report += "-- Tabelas referenciadas por " + tableOrigin.toUpperCase() + " --\n";
+report += formatPaths(referencedPaths).join("\n") + "\n";
+
+report += "-- Tabelas que referenciam " + tableOrigin.toUpperCase() + " --\n";
+report += formatPaths(referencingPaths, " -> ").join("\n") + "\n";
+
+fs.writeFileSync("resultado_analise.txt", report);
+
+console.log("Arquivos gerados:");
+console.log(" - mermaid.md");
+console.log(" - resultado_analise.txt");
