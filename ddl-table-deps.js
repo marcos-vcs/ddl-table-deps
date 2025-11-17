@@ -74,7 +74,8 @@ for (const [from, tos] of Object.entries(references)) {
         mermaid += `    ${from}-->${to};\n`;
     }
 }
-mermaid += "```";teste revisao de codigo
+mermaid += "```";
+outro teste
 
 // Salva arquivos
 fs.writeFileSync("mermaid.md", mermaid);
